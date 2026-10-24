@@ -17,6 +17,11 @@ class InputBox(WidgetBase):
         self.selection_start: int | None = None
         self.allowed_chars = allowed_chars
         self.font = font or FONTS.get_font(16)
+        # Driven by document semantics (template/current-setup tile size
+        # lock), not by password-style masking. Read-only boxes reject
+        # focus outright: a typed-looking field that ignores edits reads
+        # as a bug, not a constraint.
+        self.read_only = False
 
     @property
     def text(self) -> str:
@@ -100,6 +105,8 @@ class InputBox(WidgetBase):
         self.cursor_pos = idx + 1
 
     def handle_event(self, event: pygame.event.Event) -> bool:
+        if self.read_only:
+            return False
         if event.type == pygame.MOUSEBUTTONDOWN:
             self.is_focused = self.rect.collidepoint(event.pos)
             if self.is_focused:
@@ -191,7 +198,11 @@ class InputBox(WidgetBase):
                 )
                 pygame.draw.rect(surface, COLORS.selected, sel_rect)
 
-        txt_surf = self.font.render(self._text, True, COLORS.text)
+        txt_surf = self.font.render(
+            self._text,
+            True,
+            COLORS.text_dim if self.read_only else COLORS.text,
+        )
         surface.blit(txt_surf, (self.content_rect.x, self.content_rect.y))
 
         if self.is_focused:

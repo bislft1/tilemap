@@ -35,6 +35,7 @@ def make_editor():
         notifications=types.SimpleNamespace(notify=lambda *a, **k: None),
         open_map_setup=lambda: None,
         perform_load=lambda: None,
+        open_save_template_dialog=lambda: None,
         reload_map=lambda: None,
         perform_quick_save=lambda: None,
         open_save_as_dialog=lambda: None,

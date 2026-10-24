@@ -54,8 +54,9 @@ class MenuBar:
             Menu(
                 "File",
                 [
-                    MenuAction("New Project", self.editor.open_map_setup, "Ctrl+N"),
+                    MenuAction("New Level", self.editor.open_map_setup, "Ctrl+N"),
                     MenuAction("Open Map", self.editor.perform_load, "Ctrl+O"),
+                    MenuAction("Save Current as Template...", self.editor.open_save_template_dialog),
                     MenuAction("Reload Map", self.editor.reload_map, "F5"),
                     MenuAction("Save Map", self.editor.perform_quick_save, "Ctrl+S"),
                     MenuAction(

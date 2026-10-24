@@ -126,6 +126,7 @@ class TestEditMenu:
         ed = ed or make_editor()
         ed.open_map_setup = lambda: None
         ed.perform_load = lambda: None
+        ed.open_save_template_dialog = lambda: None
         ed.reload_map = lambda: None
         ed.perform_quick_save = lambda: None
         ed.open_save_as_dialog = lambda: None

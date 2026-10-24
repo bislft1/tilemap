@@ -38,6 +38,17 @@ class HistoryManager:
         state = self.redo_stack.pop()
         return state.data
 
+    def clear(self) -> None:
+        """Drop every captured state.
+
+        Mandatory whenever the document identity changes (new level,
+        opening a map, applying a template): the captured states hold
+        deep copies of the *previous* document's layers/nodes, so they
+        would replay stale geometry into the new one.
+        """
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+
     @property
     def can_undo(self) -> bool:
         return len(self.undo_stack) > 0

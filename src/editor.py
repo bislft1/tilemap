@@ -112,6 +112,7 @@ def _load_project_config() -> tuple[Path, Path, dict]:
         "themes_list": list(BUILTIN_THEMES),
         "nodes_path": "nodes",
         "aliases_path": "aliases",
+        "templates_path": "templates",
         "alias_scopes": {},
         "collision_paths": {"tileset": "collision", "character": "character_collision"},
     }
@@ -327,7 +328,7 @@ class Editor:
 
         center_x = (self.width - 400) // 2
         center_y = (self.height - 400) // 2
-        self.map_setup_widget = MapSetup(self, Rect(center_x, center_y, 400, 400))
+        self.map_setup_widget = MapSetup(self, Rect(center_x, center_y, 400, 460))
         self.map_setup_widget.visible = True
         self.map_properties_dialog = MapPropertiesDialog(self, Rect(center_x, center_y, 400, 260))
         self.node_manager = NodeManager(self)
@@ -755,6 +756,63 @@ class Editor:
             allowed_exts=[".json", ".tmx"],
         )
 
+    @property
+    def templates_dir(self) -> Path:
+        rel = self.config.get("templates_path", "templates")
+        return self.data_root / rel
+
+    def list_templates(self) -> list[Path]:
+        """Saved setup templates, newest edit first, oldest natively stable.
+
+        Corrupt files are skipped here (validated again with a real error
+        message when a template is actually used), so one broken file
+        cannot make the picker look empty.
+        """
+        templates_dir = self.templates_dir
+        if not templates_dir.is_dir():
+            return []
+        paths = [
+            p
+            for p in templates_dir.glob("*.json")
+            if not p.name.startswith(".")
+        ]
+        try:
+            paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            paths.sort(key=lambda p: p.name.lower())
+        return paths
+
+    def open_save_template_dialog(self):
+        templates_dir = self.templates_dir
+        try:
+            templates_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            error_handler.capture(e, context="ensure_templates_dir")
+            self.notifications.error(
+                "Template save failed", f"Cannot create {templates_dir.name}/: {e}"
+            )
+            return
+        default_name = "new_level.json"
+        if self.tilemap.active_project_path:
+            default_name = f"{self.tilemap.active_project_path.stem}.json"
+        self.open_file_manager(
+            initial_dir=templates_dir,
+            allowed_exts=[".json"],
+            mode="save",
+            default_name=default_name,
+            on_save=self.on_template_save_selected,
+        )
+
+    def on_template_save_selected(self, path: Path):
+        try:
+            if self.tilemap.save_template(path):
+                ms = self.map_setup_widget
+                if ms:
+                    ms.refresh_templates()
+        except Exception as e:
+            error_handler.capture(e, context="save_template")
+            self.notifications.error("Template save failed", str(e))
+
     def reload_map(self):
         """Reload active map from disk."""
         path = self.tilemap.active_project_path
@@ -927,8 +985,8 @@ class Editor:
 
         if hasattr(self, "map_setup_widget") and self.map_setup_widget:
             center_x = (width - 400) // 2
-            center_y = (height - 400) // 2
-            self.map_setup_widget.resize(Rect(center_x, center_y, 400, 400))
+            center_y = (height - 460) // 2
+            self.map_setup_widget.resize(Rect(center_x, center_y, 400, 460))
             if self.map_properties_dialog:
                 self.map_properties_dialog.resize(Rect(center_x, center_y, 400, 260))
 
@@ -1032,6 +1090,7 @@ class Editor:
         if self.map_setup_widget is None:
             logger.warning({"msg": "map_setup_widget is not initialized"})
             return
+        self.map_setup_widget.refresh_templates()
         self.map_setup_widget.visible = True
         self.map_setup_widget.focus_first_field()
 

@@ -75,6 +75,10 @@ class Tilemap:
         self.layer_manager.layers.clear()
         self.layer_manager.create_layer("Layer 1", "tile")
         self.layer_manager.set_active_layer(0)
+
+        # A stack full of captured states from the *previous* document
+        # would otherwise replay its layers/nodes over this fresh one.
+        self.history.clear()
         self.snapshot_saved_state()
 
     def _canonical_content_state(self) -> dict:
@@ -325,20 +329,90 @@ class Tilemap:
 
         map_dir = target_path.parent
 
-        save_data = {
+        save_data, ttype_to_firstgid = self._build_map_payload(
+            map_dir, include_content=True
+        )
+
+        # Hard gate: abort instead of writing a file whose gids were
+        # derived from a shifted/shortened tileset list.  A map saved
+        # with out-of-range ttypes silently re-points tiles at the wrong
+        # sheets on next load.
+        from utils.tileset_ops import validate_ttype_bounds
+
+        problems = validate_ttype_bounds(self.layer_manager, len(ttype_to_firstgid))
+        if problems:
+            msg = (
+                f"Save aborted: {len(problems)} tile(s)/object(s) reference a "
+                f"missing tileset index. First few: {'; '.join(problems[:3])}"
+            )
+            print(f"ERROR: {msg}")
+            error_handler.capture(
+                Exception(msg),
+                context="save_map_ttype_out_of_range",
+                severity="error",
+            )
+            notifications = getattr(self.editor, "notifications", None)
+            if notifications is not None:
+                notifications.notify(msg, color=(255, 120, 120), duration=6.0)
+            self.active_project_path = prev_active_project_path
+            return False
+
+        tmp_path = target_path.with_name(f".{target_path.name}.tmp")
+        try:
+            with open(tmp_path, "w") as f:
+                JSONDump(save_data, f, indent=2)
+            tmp_path.replace(target_path)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
+        node_manager = getattr(self.editor, "node_manager", None)
+        if node_manager is not None:
+            node_manager.save(target_path)
+
+        print(f"Saved to {target_path}")
+        self.snapshot_saved_state()
+        return True
+
+    def _build_map_payload(
+        self, map_dir: Path, *, include_content: bool
+    ) -> tuple[dict, list[int]]:
+        """Serialize editable state into one map payload.
+
+        Single owner for both save_map (setup + content) and
+        save_template (setup only). With ``include_content=True`` the
+        output must stay schema-identical to what editors and parsers
+        consume today; with ``False`` placed tile/object/placement data
+        is blanked and per-document view fields (zoom, scroll, offset)
+        are neutralized so the result is a reusable setup snapshot, not
+        a copy of the current document.
+        """
+        if include_content:
+            zoom_level = (
+                getattr(self.editor.tile_grid_widget, "zoom_level", 1.0)
+                if self.editor.tile_grid_widget
+                else 1.0
+            )
+            scroll_point = (
+                (
+                    getattr(self.editor.tile_grid_widget, "scroll_x", 0) if self.editor.tile_grid_widget else 0,
+                    getattr(self.editor.tile_grid_widget, "scroll_y", 0) if self.editor.tile_grid_widget else 0,
+                )
+            )
+        else:
+            zoom_level = 1.0
+            scroll_point = (0, 0)
+
+        save_data: dict[str, Any] = {
             "meta": {
                 "tile_size": serialize_point(self.tile_size),
                 "map_size": serialize_point(self.map_size),
-                "zoom_level": (
-                    getattr(self.editor.tile_grid_widget, "zoom_level", 1.0) if self.editor.tile_grid_widget else 1.0
-                ),
-                "scroll": serialize_point(
-                    (
-                        (getattr(self.editor.tile_grid_widget, "scroll_x", 0) if self.editor.tile_grid_widget else 0),
-                        (getattr(self.editor.tile_grid_widget, "scroll_y", 0) if self.editor.tile_grid_widget else 0),
-                    )
-                ),
-                "offset": serialize_point(self.offset),
+                "zoom_level": zoom_level,
+                "scroll": serialize_point(scroll_point),
+                "offset": serialize_point(self.offset if include_content else (0, 0)),
                 "render_scale": self.render_scale,
                 "version": "1.1",
             },
@@ -377,33 +451,8 @@ class Tilemap:
                 save_data["resources"]["tilesets"].append(ts_data)
                 firstgid += tile_count
 
-        # Hard gate: abort instead of writing a file whose gids were
-        # derived from a shifted/shortened tileset list.  A map saved
-        # with out-of-range ttypes silently re-points tiles at the wrong
-        # sheets on next load.
-        from utils.tileset_ops import validate_ttype_bounds
-
-        problems = validate_ttype_bounds(self.layer_manager, len(ttype_to_firstgid))
-        if problems:
-            msg = (
-                f"Save aborted: {len(problems)} tile(s)/object(s) reference a "
-                f"missing tileset index. First few: {'; '.join(problems[:3])}"
-            )
-            print(f"ERROR: {msg}")
-            error_handler.capture(
-                Exception(msg),
-                context="save_map_ttype_out_of_range",
-                severity="error",
-            )
-            notifications = getattr(self.editor, "notifications", None)
-            if notifications is not None:
-                notifications.notify(msg, color=(255, 120, 120), duration=6.0)
-            self.active_project_path = prev_active_project_path
-            return False
-
         if hasattr(self.editor, "autotiler") and self.editor.autotiler:
-            if "groups" not in save_data["project_state"]:
-                save_data["project_state"]["groups"] = []
+            save_data["project_state"]["groups"] = []
 
             for group in self.editor.autotiler.groups:
                 save_data["project_state"]["groups"].append(
@@ -428,6 +477,33 @@ class Tilemap:
                 error_handler.capture(e, context="save_automap_rules", severity="warning")
 
         for layer in self.layer_manager.layers:
+            if not include_content:
+                layer_data: dict[str, Any] = {
+                    "name": layer.name,
+                    "type": layer.layer_type,
+                    "visible": layer.visible,
+                    "locked": layer.locked,
+                    "opacity": layer.opacity,
+                    "z_index": layer.z_index,
+                    "y_sort": layer.y_sort,
+                    "y_sort_origin": layer.y_sort_origin,
+                    "tiles": {},
+                }
+                if layer.layer_type == "image":
+                    if layer.image_path:
+                        layer_data["image_path"] = to_project_path(
+                            layer.image_path, map_dir
+                        )
+                    layer_data["image_rect"] = dict(layer.image_rect or {})
+                    layer_data["properties"] = getattr(layer, "properties", {})
+                    layer_data["metadata"] = getattr(layer, "metadata", {})
+                else:
+                    layer_data["objects"] = {}
+                    layer_data["next_object_id"] = 1
+                    layer_data["properties"] = getattr(layer, "properties", {})
+                save_data["data"]["layers"].append(layer_data)
+                continue
+
             layer_data = {
                 "name": layer.name,
                 "type": layer.layer_type,
@@ -469,7 +545,11 @@ class Tilemap:
                 }
                 if "autotile_group" in tile:
                     tile_data["autotile_group"] = tile["autotile_group"]
-                if ttype_to_firstgid:
+                # Out-of-range ttypes are aborted by validate_ttype_bounds
+                # in save_map after this builds; writing gid here would
+                # IndexError first and replace the honest abort (toast +
+                # untouched path) with a crash. Skip the gid instead.
+                if ttype < len(ttype_to_firstgid):
                     tile_data["gid"] = ttype_to_firstgid[ttype] + variant
                 if tile.get("properties"):
                     tile_data["properties"] = tile["properties"]
@@ -495,43 +575,232 @@ class Tilemap:
             layer_data["properties"] = getattr(layer, "properties", {})
             save_data["data"]["layers"].append(layer_data)
 
-        first_layer = self.layer_manager.get_layer(0)
-        if first_layer:
-            for loc, tile in first_layer.tiles.items():
-                key = serialize_point(loc)
-                ttype = tile["ttype"]
-                variant = tile["variant"]
-                tile_data: dict[str, Any] = {
-                    "pos": serialize_point(tile["pos"]),
-                    "ttype": ttype,
-                    "variant": variant,
-                    "flip_h": bool(tile.get("flip_h")),
-                    "flip_v": bool(tile.get("flip_v")),
-                }
-                if "autotile_group" in tile:
-                    tile_data["autotile_group"] = tile["autotile_group"]
-                if ttype_to_firstgid:
-                    tile_data["gid"] = ttype_to_firstgid[ttype] + variant
-                save_data["data"]["ongrid"][key] = tile_data
+        if include_content:
+            first_layer = self.layer_manager.get_layer(0)
+            if first_layer:
+                for loc, tile in first_layer.tiles.items():
+                    key = serialize_point(loc)
+                    ttype = tile["ttype"]
+                    variant = tile["variant"]
+                    tile_data = {
+                        "pos": serialize_point(tile["pos"]),
+                        "ttype": ttype,
+                        "variant": variant,
+                        "flip_h": bool(tile.get("flip_h")),
+                        "flip_v": bool(tile.get("flip_v")),
+                    }
+                    if "autotile_group" in tile:
+                        tile_data["autotile_group"] = tile["autotile_group"]
+                    if ttype < len(ttype_to_firstgid):
+                        tile_data["gid"] = ttype_to_firstgid[ttype] + variant
+                    save_data["data"]["ongrid"][key] = tile_data
 
-        tmp_path = target_path.with_name(f".{target_path.name}.tmp")
+        return save_data, ttype_to_firstgid
+
+    def save_template(self, target: str | Path) -> bool:
+        """Save the current setup (tilesets, rules, layer stack) as a
+        reusable level template.
+
+        Writes the same map schema with placed content blanked. Must
+        never mutate document state: the level being templated keeps its
+        active path and its dirty state, otherwise a stray Ctrl+S after
+        templating would feel like the map was "saved" while it never
+        was; the template is a side artifact, not a save.
+        """
+        target_path = Path(target)
+        if target_path.suffix == "":
+            target_path = target_path.with_suffix(".json")
+
         try:
-            with open(tmp_path, "w") as f:
-                JSONDump(save_data, f, indent=2)
-            tmp_path.replace(target_path)
-        except Exception:
+            if not target_path.parent.exists():
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+
+            payload, _firstgids = self._build_map_payload(
+                target_path.parent, include_content=False
+            )
+
+            tmp_path = target_path.with_name(f".{target_path.name}.tmp")
             try:
-                tmp_path.unlink(missing_ok=True)
+                with open(tmp_path, "w") as f:
+                    JSONDump(payload, f, indent=2)
+                tmp_path.replace(target_path)
             except Exception:
-                pass
-            raise
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+        except Exception as e:
+            error_handler.capture(e, context="save_template")
+            print(f"ERROR: Failed to save template: {e}")
+            notifications = getattr(self.editor, "notifications", None)
+            if notifications is not None:
+                notifications.notify(
+                    f"Failed to save template: {e}", color=(255, 120, 120), duration=5.0
+                )
+            return False
 
-        if hasattr(self.editor, "node_manager"):
-            self.editor.node_manager.save(target_path)
-
-        print(f"Saved to {target_path}")
-        self.snapshot_saved_state()
+        print(f"Saved template to {target_path}")
+        notifications = getattr(self.editor, "notifications", None)
+        if notifications is not None:
+            notifications.notify(f"Template saved: {target_path.name}", duration=3.0)
         return True
+
+    def apply_template(
+        self, path: Path, map_size: "TCoor | None" = None
+    ) -> None:
+        """Start an unsaved level from a setup template.
+
+        Loads the template's resources/project_state/layers, then wipes
+        every placed element and cuts document ties to the template file
+        (path, history, nodes): the new level must be an independent,
+        clean document, not a shallow edit session over a borrowed file.
+        """
+        payload = self.read_map_payload(path)
+        template_map_size = deserialize_point(payload["meta"].get("map_size", "40;40"))
+        template_tile_size = deserialize_point(payload["meta"]["tile_size"])
+
+        self.apply_map_payload(path, payload, load_nodes=False)
+
+        for layer in self.layer_manager.layers:
+            layer.clear_content()
+        if not self.layer_manager.layers:
+            self.layer_manager.create_layer("Layer 1", "tile")
+            self.layer_manager.set_active_layer(0)
+
+        self.tile_size = template_tile_size
+        self.map_size = map_size if map_size is not None else template_map_size
+        self.offset = (0, 0)
+        self.active_project_path = None
+        self.history.clear()
+        self.initialized = True
+
+        tile_grid = getattr(self.editor, "tile_grid_widget", None)
+        if tile_grid is not None:
+            tile_grid.zoom_level = 1.0
+            tile_grid.scroll_x = 0
+            tile_grid.scroll_y = 0
+            if hasattr(tile_grid, "clear_selection"):
+                tile_grid.clear_selection()
+            if hasattr(tile_grid, "clamp_scroll"):
+                tile_grid.clamp_scroll()
+            if hasattr(tile_grid, "invalidate_bounds_cache"):
+                tile_grid.invalidate_bounds_cache()
+            if hasattr(tile_grid, "invalidate_image_cache"):
+                tile_grid.invalidate_image_cache()
+
+        self.snapshot_saved_state()
+
+    def has_reusable_setup(self) -> bool:
+        """True when the current document carries worth-keeping setup.
+
+        Drives whether MapSetup offers "Current setup" as a start
+        point: an untouched default map is not setup, offering it would
+        make the option look broken (nothing to reuse).
+        """
+        ts_widget = getattr(self.editor, "tileset_widget", None)
+        if ts_widget is not None and ts_widget.tilesets:
+            return True
+        for layer in self.layer_manager.layers:
+            if layer.tiles or layer.objects:
+                return True
+            if layer.layer_type == "image" and layer.image_placements:
+                return True
+        autotiler = getattr(self.editor, "autotiler", None)
+        if autotiler is not None and any(g.rules for g in autotiler.groups):
+            return True
+        automap = getattr(self.editor, "regex_automap_designer", None)
+        return automap is not None and bool(automap.pattern_rules)
+
+    def new_level(
+        self, tile_size: "TCoor", map_size: "TCoor", *, keep_setup: bool
+    ) -> None:
+        """Start an unsaved level, keeping or dropping the loaded setup.
+
+        The existing MapSetup "Create" ran a bare ``init_size`` — layers
+        reset but tilesets/autotile rules silently carried over — which
+        made "new" neither blank nor reusable. Both modes are explicit
+        now and every mode clears history and node state so nothing from
+        the previous document leaks in.
+        """
+        if keep_setup:
+            for layer in self.layer_manager.layers:
+                layer.clear_content()
+            if not self.layer_manager.layers:
+                self.layer_manager.create_layer("Layer 1", "tile")
+                self.layer_manager.set_active_layer(0)
+
+            self.tile_size = tile_size
+            self.map_size = map_size
+            self.offset = (0, 0)
+            self.active_project_path = None
+            self.history.clear()
+            self.initialized = True
+        else:
+            self._reset_setup_state()
+            self.init_size(tile_size, map_size)
+
+        node_manager = getattr(self.editor, "node_manager", None)
+        if node_manager is not None:
+            node_manager.clear()
+            node_selector = getattr(self.editor, "node_selector", None)
+            if node_selector is not None and hasattr(node_selector, "_rebuild_filter"):
+                node_selector._rebuild_filter()
+
+        tile_grid = getattr(self.editor, "tile_grid_widget", None)
+        if tile_grid is not None:
+            tile_grid.zoom_level = 1.0
+            tile_grid.scroll_x = 0
+            tile_grid.scroll_y = 0
+            if hasattr(tile_grid, "clear_selection"):
+                tile_grid.clear_selection()
+            if hasattr(tile_grid, "clamp_scroll"):
+                tile_grid.clamp_scroll()
+            if hasattr(tile_grid, "invalidate_bounds_cache"):
+                tile_grid.invalidate_bounds_cache()
+            if hasattr(tile_grid, "invalidate_image_cache"):
+                tile_grid.invalidate_image_cache()
+
+        self.snapshot_saved_state()
+
+    def _reset_setup_state(self) -> None:
+        """Drop everything that belongs to a project/setup, not a map.
+
+        Used by the blank path of :meth:`new_level`. Tilesets must reset
+        in the same operation as autotile rules: rules keep raw
+        ``tileset_index`` references and would turn into dangling
+        pointing errors the moment the list they index into empties.
+        """
+        from widgets.autotiler import AutotileGroup
+
+        editor = getattr(self, "editor", None)
+        if editor is None:
+            return
+
+        ts_widget = getattr(editor, "tileset_widget", None)
+        if ts_widget is not None:
+            ts_widget.tilesets.clear()
+            ts_widget.tileset_map.clear()
+            ts_widget.active_idx = -1
+            ts_widget.selected_tile = None
+            ts_widget.rule_hints.clear()
+            if hasattr(ts_widget, "_sync_tree"):
+                ts_widget._sync_tree()
+
+        autotiler = getattr(editor, "autotiler", None)
+        if autotiler is not None:
+            autotiler.groups = [AutotileGroup("Default")]
+            autotiler.selected_group_idx = 0
+            autotiler.selected_rule_index = -1
+
+        automap = getattr(editor, "regex_automap_designer", None)
+        if automap is not None:
+            automap.pattern_rules.clear()
+            automap.selected_rule_idx = -1
+
+        editor.last_picked = None
+        if hasattr(editor, "active_alias"):
+            editor.active_alias = None
 
     def _project_base_path(self) -> Path:
         base_path = getattr(getattr(self, "editor", None), "base_path", None)
@@ -546,8 +815,22 @@ class Tilemap:
 
     def _serialize_autotile_rule(self, rule: "AutotileRule", save_dir: Path) -> dict:
         data = rule.to_dict()
-        if data.get("tileset_path"):
-            data["tileset_path"] = to_project_path(data["tileset_path"], save_dir)
+        raw_path = data.get("tileset_path")
+        if raw_path:
+            # Stored paths carry the frame of the document they were read
+            # from (active map, or the template map a rule came from).
+            # Resolve against that frame, then rewrite for save_dir: a
+            # Save As into a deeper directory must re-point rules, not
+            # silently move them.
+            src_dir = (
+                self.active_project_path.parent
+                if self.active_project_path
+                else save_dir
+            )
+            resolved = Path(raw_path).expanduser()
+            if not resolved.is_absolute():
+                resolved = src_dir / resolved
+            data["tileset_path"] = to_project_path(resolved, save_dir)
         return data
 
     def _path_matches_project_path(self, stored_path: str, actual_path: Path) -> bool:
@@ -576,14 +859,30 @@ class Tilemap:
                 except Exception:
                     continue
 
-        if resolved_ts and rule.variant_ids:
-            vid = rule.variant_ids[0]
-            cols = resolved_ts.surface.get_width() // self.tile_size[0]
-            tx = (vid % cols) * self.tile_size[0]
-            ty = (vid // cols) * self.tile_size[1]
-            pr_rect = Rect(tx, ty, *self.tile_size)
-            if resolved_ts.surface.get_rect().contains(pr_rect):
-                rule.preview_surf = resolved_ts.surface.subsurface(pr_rect).copy()
+        if resolved_ts:
+            # Bind the rule to a filesystem truth. Relative rule paths
+            # lose meaning when applying templates (rule path relative
+            # to a template dir, saved later from a maps/ dir); with the
+            # absolute path set here, _serialize_autotile_rule can
+            # always rewrite it correctly for whatever it saves next.
+            rule_abs = Path(resolved_ts.path).expanduser()
+            if not rule_abs.is_absolute():
+                base = (
+                    self.active_project_path.parent
+                    if self.active_project_path
+                    else self._project_base_path()
+                )
+                rule_abs = base / rule_abs
+            rule.tileset_path = str(rule_abs)
+
+            if rule.variant_ids:
+                vid = rule.variant_ids[0]
+                cols = resolved_ts.surface.get_width() // self.tile_size[0]
+                tx = (vid % cols) * self.tile_size[0]
+                ty = (vid // cols) * self.tile_size[1]
+                pr_rect = Rect(tx, ty, *self.tile_size)
+                if resolved_ts.surface.get_rect().contains(pr_rect):
+                    rule.preview_surf = resolved_ts.surface.subsurface(pr_rect).copy()
 
     def read_map_payload(self, path: Path) -> dict:
         if not path.exists():
@@ -599,7 +898,14 @@ class Tilemap:
             raise ValueError("Invalid project format")
         return payload
 
-    def apply_map_payload(self, path: Path, payload: dict) -> None:
+    def apply_map_payload(
+        self, path: Path, payload: dict, *, load_nodes: bool = True
+    ) -> None:
+        # Captured undo states belong to whatever document was open
+        # before this map: replaying them into the newly loaded layers
+        # produces stale geometry in the new doc, so the stack must die
+        # with the previous document.
+        self.history.clear()
         self.layer_manager.clear_all_layers()
         self.active_project_path = path
 
@@ -694,6 +1000,16 @@ class Tilemap:
             if added_placeholders and hasattr(self.editor, "suggestion_registry"):
                 self.editor.suggestion_registry.refresh(self.editor)
 
+            # Placeholder records keep whichever path string came from
+            # the file, which may be relative to the source map dir.
+            # Normalize to absolute here: every later save rewrites
+            # resource paths against its own directory, and a relative
+            # leftover would silently resolve against the wrong folder.
+            for ts in self.editor.tileset_widget.tilesets:
+                ts_abs = Path(ts.path).expanduser()
+                if not ts_abs.is_absolute():
+                    ts.path = (path.parent / ts_abs).resolve()
+
             self.editor.tileset_widget.load_object_tileset_companions()
 
         if hasattr(self.editor, "autotiler") and self.editor.autotiler:
@@ -778,7 +1094,12 @@ class Tilemap:
 
         node_manager = getattr(self.editor, "node_manager", None)
         if node_manager is not None:
-            node_manager.load(path)
+            if load_nodes:
+                node_manager.load(path)
+            else:
+                # Setup sources (templates) must not drag their authoring
+                # map's node layout into the new document.
+                node_manager.clear()
             node_selector = getattr(self.editor, "node_selector", None)
             if node_selector is not None:
                 node_selector._rebuild_filter()

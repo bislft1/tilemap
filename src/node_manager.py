@@ -58,6 +58,20 @@ class NodeManager:
         self._nodes_dir = None
         self._active_sidecar = None
 
+    def clear(self) -> None:
+        """Drop all in-memory node state and forget the loaded sidecar.
+
+        Call whenever the document identity changes (new level, template
+        apply): without it the previous map's node layout silently
+        re-appears in the fresh level and is written out under the new
+        map's sidecar on first save.
+        """
+        self.nodes.clear()
+        self.groups.clear()
+        self.active_node_id = None
+        self.active_group_name = None
+        self._active_sidecar = None
+
     def _sidecar_path_for(self, map_path: Path) -> Path:
         return self.nodes_dir / f"{map_path.stem}.nodes.json"
 

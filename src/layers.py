@@ -490,6 +490,23 @@ class Layer:
             self.tiles.clear()
             self.objects.clear()
 
+    def clear_content(self) -> None:
+        """Wipe all placed content while keeping the layer configuration.
+
+        Unlike :meth:`clear`, this ignores ``locked``: starting a level
+        from a setup template must leave it empty even when the source
+        map locked the layer, otherwise the "cleared" map silently ships
+        stale geometry. Counters reset too, so freshly painted objects
+        and image placements get clean IDs instead of importing a high
+        counter from the template author's session.
+        """
+        self.tiles.clear()
+        self.objects.clear()
+        self.next_object_id = 1
+        if self.layer_type == "image":
+            self.image_placements = []
+            self.next_placement_id = 1
+
     def to_dict(self) -> dict:
         data = {
             "name": self.name,

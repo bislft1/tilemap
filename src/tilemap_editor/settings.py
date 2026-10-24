@@ -27,6 +27,7 @@ def init_settings(generate_main: bool = False) -> None:
         "collision_paths": {"tileset": "collision", "character": "character_collision"},
         "nodes_path": "nodes",
         "aliases_path": "aliases",
+        "templates_path": "templates",
         "alias_scopes": {},
         "theme": "dark",
         "themes_list": list(BUILTIN_THEMES),
