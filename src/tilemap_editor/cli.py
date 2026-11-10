@@ -64,6 +64,17 @@ def main() -> None:
         help="Arguments forwarded to the marker generator (see: tilemap-editor markers -- --help)",
     )
 
+    view_parser = subparsers.add_parser(
+        "view",
+        aliases=["viewer"],
+        help="Inspect an image or tileset with grid sizing and variant IDs",
+    )
+    view_parser.add_argument(
+        "viewer_args",
+        nargs="*",
+        help="Arguments forwarded to the image viewer (see: tilemap-editor view --help)",
+    )
+
     if sys.argv[1:2] == ["markers"]:
         from standalone_marker_palette import main as markers_main
 
@@ -71,6 +82,14 @@ def main() -> None:
         if palette_args[:1] == ["--"]:
             palette_args = palette_args[1:]
         sys.exit(markers_main(palette_args))
+
+    if sys.argv[1:2] in (["view"], ["viewer"]):
+        from standalone_image_viewer import main as viewer_main
+
+        viewer_args = sys.argv[2:]
+        if viewer_args[:1] == ["--"]:
+            viewer_args = viewer_args[1:]
+        sys.exit(viewer_main(viewer_args))
 
     args = parser.parse_args()
 
