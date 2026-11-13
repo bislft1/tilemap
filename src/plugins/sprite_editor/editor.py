@@ -12,6 +12,7 @@ from pygame import Rect, Surface
 from utils.natural_sort import natural_key
 from utils.shortcuts import is_cmd_or_ctrl
 from widgets.ui.button import Button
+from widgets.ui.confirm_dialog import ConfirmDialog
 from widgets.ui.context_menu import ContextMenu
 from widgets.ui.draw_utils import draw_panel
 from widgets.ui.menubar import Menu, MenuAction, MenuBar, MenuSeparator
@@ -41,6 +42,7 @@ from .region_export import (
     save_regions_json,
 )
 from .selection import Selection
+from .tab_strip import TAB_H, TabStrip
 from .tools import (
     ColorTool,
     FreeTool,
@@ -61,6 +63,38 @@ BTN_H = 28
 BTN_GAP = 4
 SEP_W = 10
 IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".bmp", ".gif"]
+SOFT_TAB_LIMIT = 10
+
+
+class DocumentTab:
+    """One open document: canvas state plus its own view and history."""
+
+    __slots__ = (
+        "doc",
+        "camera",
+        "selection",
+        "commands",
+        "image_path",
+        "loaded_from",
+        "save_path",
+        "saved_revision",
+    )
+
+    def __init__(
+        self,
+        doc: Document,
+        camera: Camera,
+        selection: Selection,
+        commands: CommandStack,
+    ):
+        self.doc = doc
+        self.camera = camera
+        self.selection = selection
+        self.commands = commands
+        self.image_path: Path | None = None
+        self.loaded_from: Path | None = None
+        self.save_path: Path | None = None
+        self.saved_revision: int = doc.revision
 
 
 class SpriteEditor:
@@ -123,6 +157,20 @@ class SpriteEditor:
         if surface is not None:
             self._load_surface(surface, [image_path.name if image_path else "sheet"])
 
+        # one bundle per open document; the initial canvas becomes tab 0
+        self._tabs: list[DocumentTab] = [
+            DocumentTab(self.doc, self.camera, self.selection, self.commands)
+        ]
+        self._active_idx = 0
+        self._sync_active_tab()
+        self._confirm_dialog = ConfirmDialog(self.rect)
+        self._tab_strip = TabStrip(
+            Rect(self.rect.x, self.rect.y + MENU_H + TOOLBAR_H, self.rect.w, TAB_H),
+            on_switch=self._switch_tab,
+            on_close=self._close_tab,
+            on_new=self._new_blank_tab,
+        )
+
         self._scale_dialog = ScaleDialog(self.rect)
         self._grid_dialog = GridSizeDialog(self.rect)
         self._status_bar = StatusBar(
@@ -148,9 +196,9 @@ class SpriteEditor:
     def _content_rect(self) -> Rect:
         return Rect(
             self.rect.x,
-            self.rect.y + MENU_H + TOOLBAR_H,
+            self.rect.y + MENU_H + TOOLBAR_H + TAB_H,
             self.rect.w,
-            self.rect.h - MENU_H - TOOLBAR_H - STATUS_H,
+            self.rect.h - MENU_H - TOOLBAR_H - TAB_H - STATUS_H,
         )
 
     def resize(self, x: int, y: int, w: int, h: int) -> None:
@@ -160,6 +208,10 @@ class SpriteEditor:
         self._status_bar.resize(Rect(self.rect.x, self.rect.bottom - STATUS_H, self.rect.w, STATUS_H))
         self._scale_dialog.editor_rect = self.rect
         self._grid_dialog.editor_rect = self.rect
+        self._confirm_dialog.editor_rect = self.rect
+        self._tab_strip.resize(
+            Rect(self.rect.x, self.rect.y + MENU_H + TOOLBAR_H, self.rect.w, TAB_H)
+        )
         self._build_toolbar()
 
     def _build_menus(self) -> list[Menu]:
@@ -209,6 +261,33 @@ class SpriteEditor:
                     ),
                     MenuSeparator(),
                     MenuAction("Close", self._on_close, "Ctrl+Q"),
+                ],
+            ),
+            Menu(
+                "Sheets",
+                [
+                    MenuAction("New Blank Canvas", self._new_blank_tab, "Ctrl+N"),
+                    MenuAction(
+                        "Close Tab",
+                        lambda: self._close_tab(self._active_idx),
+                        "Ctrl+W",
+                    ),
+                    MenuAction(
+                        "Close Others",
+                        self._on_close_others,
+                        is_enabled=lambda: len(self._tabs) > 1,
+                    ),
+                    MenuSeparator(),
+                    MenuAction("Save All", self._on_save_all),
+                    MenuSeparator(),
+                    *[
+                        MenuAction(
+                            self._tab_label(tab) + (" *" if self._tab_dirty(tab) else ""),
+                            lambda i=i: self._switch_tab(i),
+                            is_checked=lambda i=i: i == self._active_idx,
+                        )
+                        for i, tab in enumerate(self._tabs)
+                    ],
                 ],
             ),
             Menu(
@@ -322,6 +401,180 @@ class SpriteEditor:
 
     def _on_close(self) -> None:
         pygame.event.post(pygame.event.Event(pygame.QUIT))
+
+    # ------------------------------------------------------------------
+    # document tabs
+    # ------------------------------------------------------------------
+
+    def _active_tab(self) -> DocumentTab:
+        return self._tabs[self._active_idx]
+
+    def _sync_active_tab(self) -> None:
+        """Mirror editor-level paths onto the active tab bundle."""
+        if not self._tabs:
+            return
+        tab = self._tabs[self._active_idx]
+        tab.image_path = self.image_path
+        tab.loaded_from = self._loaded_from
+        tab.save_path = self._save_path
+
+    def _mark_tab_saved(self) -> None:
+        self._sync_active_tab()
+        self._active_tab().saved_revision = self.doc.revision
+        self._sync_tab_strip()
+
+    def _tab_dirty(self, tab: DocumentTab) -> bool:
+        return tab.doc.revision != tab.saved_revision
+
+    def _tab_label(self, tab: DocumentTab) -> str:
+        name = (
+            tab.image_path.name
+            if tab.image_path
+            else (tab.loaded_from.name if tab.loaded_from else None)
+        )
+        if not name and tab.doc.sheets:
+            name = tab.doc.sheets[0]
+            if len(tab.doc.sheets) > 1:
+                name += f"+{len(tab.doc.sheets) - 1}"
+        return name or "Blank"
+
+    def _sync_tab_strip(self) -> None:
+        if getattr(self, "_tab_strip", None) is None:
+            return
+        tabs = [
+            {"label": self._tab_label(t), "dirty": self._tab_dirty(t)}
+            for t in self._tabs
+        ]
+        self._tab_strip.set_tabs(tabs, self._active_idx)
+        # the Sheets menu lists the open tabs, so refresh it too
+        if getattr(self, "menubar", None) is not None:
+            self.menubar.menus = self._build_menus()
+            self.menubar._layout_menus()
+
+    def _switch_tab(self, idx: int, force: bool = False) -> None:
+        if not (0 <= idx < len(self._tabs)):
+            return
+        if idx == self._active_idx and not force:
+            return
+        self._sync_active_tab()
+        self._abort_in_flight_gestures()
+        self._active_idx = idx
+        tab = self._tabs[idx]
+        self.doc = tab.doc
+        self.selection = tab.selection
+        self.camera = tab.camera
+        self.commands = tab.commands
+        self.image_path = tab.image_path
+        self._loaded_from = tab.loaded_from
+        self._save_path = tab.save_path
+        self.ctx.doc = tab.doc
+        self.ctx.selection = tab.selection
+        self.ctx.camera = tab.camera
+        self.ctx.commands = tab.commands
+        self.viewport.doc = tab.doc
+        self.viewport.camera = tab.camera
+        self.viewport.selection = tab.selection
+        self._prune_dangling_region_selection()
+        self._update_button_states()
+        self._sync_tab_strip()
+        self._status_bar.info(f"Sheet: {self._tab_label(tab)}")
+
+    def _cycle_tab(self, delta: int) -> None:
+        if len(self._tabs) > 1:
+            self._switch_tab((self._active_idx + delta) % len(self._tabs))
+
+    def _new_blank_tab(self) -> None:
+        if len(self._tabs) >= SOFT_TAB_LIMIT:
+            self._status_bar.warning(
+                f"{len(self._tabs)} sheets open — memory grows with each tab"
+            )
+        tile = self.doc.tile_size if self.doc.has_canvas else (32, 32)
+        doc = Document(tile_size=tile)
+        tab = DocumentTab(
+            doc=doc,
+            camera=Camera(),
+            selection=Selection(),
+            commands=CommandStack(50),
+        )
+        self._tabs.append(tab)
+        # force: closing the last tab lands the new blank at the same index
+        self._switch_tab(len(self._tabs) - 1, force=True)
+        self._status_bar.info("New blank canvas")
+
+    def _close_tab(self, idx: int) -> None:
+        if not (0 <= idx < len(self._tabs)):
+            return
+        tab = self._tabs[idx]
+        if self._tab_dirty(tab):
+            self._confirm_dialog.show(
+                title="Discard unsaved changes?",
+                message=f"Close '{self._tab_label(tab)}' without saving?",
+                on_confirm=lambda: self._close_tab_confirmed(idx),
+                on_cancel=lambda: None,
+            )
+            return
+        self._close_tab_confirmed(idx)
+
+    def _close_tab_confirmed(self, idx: int) -> None:
+        if not (0 <= idx < len(self._tabs)):
+            return
+        was_active = idx == self._active_idx
+        self._tabs.pop(idx)
+        if not self._tabs:
+            self._new_blank_tab()
+            return
+        if was_active:
+            self._active_idx = min(idx, len(self._tabs) - 1)
+            self._switch_tab(self._active_idx, force=True)
+        elif self._active_idx >= len(self._tabs):
+            # list shrank below the active index (Close Others)
+            self._active_idx = len(self._tabs) - 1
+            self._switch_tab(self._active_idx, force=True)
+        else:
+            self._sync_tab_strip()
+
+    def _on_close_others(self) -> None:
+        for i in range(len(self._tabs) - 1, -1, -1):
+            if i != self._active_idx:
+                self._close_tab(i)
+
+    def _padded_surface(self, doc: Document) -> Surface:
+        """Canvas padded up to whole tiles for saving."""
+        surf = doc.surface
+        if surf is None:
+            raise ValueError("no canvas")
+        w, h = surf.get_size()
+        tw, th = doc.tile_size
+        pad_w = ((w + tw - 1) // tw) * tw if tw else w
+        pad_h = ((h + th - 1) // th) * th if th else h
+        if pad_w != w or pad_h != h:
+            padded = pygame.Surface((pad_w, pad_h), pygame.SRCALPHA)
+            padded.fill((0, 0, 0, 0))
+            padded.blit(surf, (0, 0))
+            surf = padded
+        return surf
+
+    def _on_save_all(self) -> None:
+        self._sync_active_tab()
+        saved = 0
+        for tab in self._tabs:
+            target = tab.save_path or tab.image_path
+            if not target or not tab.doc.has_canvas:
+                continue
+            try:
+                pygame.image.save(self._padded_surface(tab.doc), str(target))
+                save_regions_json(tab.doc.regions, regions_sidecar_path(target))
+                tab.saved_revision = tab.doc.revision
+                saved += 1
+            except Exception as e:
+                self._status_bar.error(f"Save failed {target.name}: {e}")
+        self._sync_tab_strip()
+        if saved:
+            plural = "s" if saved != 1 else ""
+            self._status_bar.success(f"Saved {saved} sheet{plural}")
+            self._toast(f"Saved {saved} sheet{plural}")
+        elif not self.doc.has_canvas:
+            self._status_bar.warning("Nothing to save")
 
     def _on_select_all(self) -> None:
         if not self.doc.has_canvas:
@@ -962,6 +1215,9 @@ class SpriteEditor:
         if self._handle_drop_event(event):
             return True
 
+        if self._confirm_dialog.active:
+            return self._confirm_dialog.handle_event(event)
+
         if self._context_menu.is_open:
             return self._context_menu.handle_event(event)
 
@@ -975,6 +1231,10 @@ class SpriteEditor:
 
         if self._file_manager is not None:
             return self._file_manager.handle_event(event)
+
+        if self._tab_strip.handle_event(event):
+            self._update_button_states()
+            return True
 
         if self._scale_dialog.active:
             return self._scale_dialog.handle_event(event)
@@ -1005,6 +1265,15 @@ class SpriteEditor:
             mods = pygame.key.get_mods()
             ctrl = is_cmd_or_ctrl(mods)
             if ctrl:
+                if event.key == pygame.K_TAB:
+                    self._cycle_tab(-1 if mods & pygame.KMOD_SHIFT else 1)
+                    return True
+                if event.key == pygame.K_n:
+                    self._new_blank_tab()
+                    return True
+                if event.key == pygame.K_w:
+                    self._close_tab(self._active_idx)
+                    return True
                 if event.key == pygame.K_z and mods & pygame.KMOD_SHIFT:
                     self._on_redo()
                     return True
@@ -1337,6 +1606,7 @@ class SpriteEditor:
             self._mode_indicator.draw(screen)
 
         if self._file_manager is None:
+            self._tab_strip.draw(screen)
             self.viewport.draw(screen, self._active_tool)
 
         self._status_bar.draw(screen)
@@ -1345,6 +1615,8 @@ class SpriteEditor:
             self._scale_dialog.draw(screen)
         if self._grid_dialog.active:
             self._grid_dialog.draw(screen)
+        if self._confirm_dialog.active:
+            self._confirm_dialog.draw(screen)
 
         if self._file_manager is not None:
             self._file_manager.draw(screen)
@@ -1376,6 +1648,9 @@ class SpriteEditor:
     SHORTCUTS = [
         ("Open", "Ctrl+O"),
         ("Quick open", "Ctrl+P"),
+        ("New blank canvas", "Ctrl+N"),
+        ("Close tab", "Ctrl+W"),
+        ("Next / prev tab", "Ctrl+Tab / Ctrl+Shift+Tab"),
         ("Save", "Ctrl+S"),
         ("Export PNGs", "Ctrl+E"),
         ("Undo", "Ctrl+Z"),
@@ -1519,6 +1794,10 @@ class SpriteEditor:
             self._last_browse_dir = self._mini_nav.current_dir
             self._save_quick_open_prefs()
         self._on_add_sheets([path])
+        # keep the "currently loaded" dot marker live
+        if self._mini_nav is not None:
+            self._mini_nav.current = self._loaded_from
+            self._mini_nav._refresh()
 
     def _open_save_dialog(self) -> None:
         if not self.doc.has_canvas:
@@ -1560,6 +1839,7 @@ class SpriteEditor:
             self.set_save_path(path)
             save_regions_json(self.doc.regions, regions_sidecar_path(path))
             self.image_path = path
+            self._mark_tab_saved()
             self._status_bar.success(f"Saved {path.name}")
             self._toast(f"Saved {path.name}")
         except Exception as e:
@@ -1621,6 +1901,8 @@ class SpriteEditor:
             msg = f"Loaded {n} sheet{plural}" if was_empty else f"Appended {n} sheet{plural}"
             self._status_bar.success(msg)
             self._toast(msg)
+            self._sync_active_tab()
+            self._sync_tab_strip()
         self._close_file_manager()
 
     @staticmethod
@@ -1656,6 +1938,8 @@ class SpriteEditor:
         self.commands.clear()
         self.selection.clear()
         self._fit_sheet()
+        if getattr(self, "_tabs", None):
+            self._mark_tab_saved()
 
     def _fit_sheet(self, margin: float = 0.9) -> None:
         """Fit sheet in view. Small sheets open at 100%."""
