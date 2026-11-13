@@ -9,27 +9,10 @@ from utils.shortcuts import is_cmd_or_ctrl
 from widgets.input import InlineTextInput
 from widgets.ui.button import Button
 from widgets.ui.property_editor import PropertyEditor
-from widgets.ui.theme import COLORS, FONTS, SHAPE
+from widgets.ui.theme import COLORS, FONTS, SHAPE, SPACING, fit_text
 
 if TYPE_CHECKING:
     from editor import Editor
-
-
-def fit_text(font, text: str, max_w: int) -> str:
-    """Shorten text to fit width."""
-    if max_w <= 0:
-        return ""
-    try:
-        if font.size(text)[0] <= max_w:
-            return text
-        ellipsis = ".."
-        if font.size(ellipsis)[0] > max_w:
-            return ""
-        while text and font.size(text + ellipsis)[0] > max_w:
-            text = text[:-1]
-        return text + ellipsis
-    except Exception:
-        return text
 
 
 class LayerSelector:

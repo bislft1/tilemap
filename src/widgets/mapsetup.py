@@ -10,7 +10,7 @@ from .input import DigitInput
 from .ui.button import Button
 from .ui.context_menu import ContextMenu
 from .ui.menubar import MenuAction, MenuSeparator
-from .ui.theme import COLORS, FONTS, SPACING
+from .ui.theme import COLORS, FONTS, SPACING, fit_text
 from .widget_base import WidgetBase
 
 if TYPE_CHECKING:
@@ -19,11 +19,33 @@ if TYPE_CHECKING:
 
 TITLE_H = 30
 START_ROW_H = 34
-INFO_H = 22
+INFO_H = 34
+ERR_H = 20
 CELL_H = 70
 INPUT_H = 60
 BTN_W = 120
 BTN_H = 35
+
+
+def _wrap_lines(text: str, font, max_w: int, max_lines: int = 2) -> list[str]:
+    """Word-wrap text to at most ``max_lines`` lines of ``max_w`` pixels."""
+    if not text:
+        return [""]
+    words = text.split()
+    lines = []
+    cur = words[0]
+    for word in words[1:]:
+        trial = f"{cur} {word}"
+        if font.size(trial)[0] <= max_w:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = word
+    lines.append(cur)
+    if len(lines) <= max_lines:
+        return lines
+    tail = " ".join(lines[max_lines - 1:])
+    return lines[: max_lines - 1] + [fit_text(font, tail, max_w)]
 
 
 class MapSetup(WidgetBase):
@@ -168,6 +190,7 @@ class MapSetup(WidgetBase):
         self.btn_start_from.text = (
             "Start from: Blank" if mode == "blank" else "Start from: current"
         )
+        self.btn_start_from.tooltip_text = ""
         self.focus_first_field()
 
     def _select_template(self, path: Path):
@@ -205,6 +228,8 @@ class MapSetup(WidgetBase):
         self._set_tile_values(tile_w, tile_h, locked=True)
         self._set_map_values(map_w, map_h)
         self.btn_start_from.text = f"Start from: {path.stem}"
+        # long names get ellipsized on the button; hover shows the full name
+        self.btn_start_from.tooltip_text = path.stem
         self._info_line = (
             f"Template: {len(tilesets)} tileset(s), {len(layers)} layer(s), "
             f"tile size {tile_w}x{tile_h} (locked). Content is cleared."
@@ -244,7 +269,9 @@ class MapSetup(WidgetBase):
         cols = 2
         cell_w = self.content_rect.width // cols
         start_x = self.content_rect.x
-        start_y = self.content_rect.y + TITLE_H + START_ROW_H + SPACING["md"]
+        start_y = (
+            self.content_rect.y + TITLE_H + START_ROW_H + INFO_H + SPACING["md"]
+        )
 
         for i, inp in enumerate(self.inputs):
             row, col = divmod(i, cols)
@@ -266,7 +293,7 @@ class MapSetup(WidgetBase):
             self.content_rect.width,
             30,
         )
-        btn_create_y = last_input_bottom + SPACING["xl"]
+        btn_create_y = last_input_bottom + SPACING["xl"] + ERR_H
         self.btn_create.rect = Rect(cx - BTN_W // 2, btn_create_y, BTN_W, BTN_H)
         btn_open_y = btn_create_y + BTN_H + SPACING["md"]
         self.btn_open.rect = Rect(cx - BTN_W // 2, btn_open_y, BTN_W, BTN_H)
@@ -409,8 +436,20 @@ class MapSetup(WidgetBase):
 
         self.btn_start_from.draw(screen)
 
-        info = self.font_info.render(self._info_line, True, COLORS.text_dim)
-        screen.blit(info, (self.content_rect.x, self.btn_start_from.rect.bottom + 4))
+        # hover tooltip reveals the full template name that the button
+        # label truncates
+        if self.btn_start_from._hovered and self.btn_start_from.tooltip_text:
+            self.editor.tooltip.show(
+                self.btn_start_from.tooltip_text, (pygame.mouse.get_pos()[0] + 10, pygame.mouse.get_pos()[1] + 10)
+            )
+
+        info_y = self.btn_start_from.rect.bottom + 4
+        for line in _wrap_lines(
+            self._info_line, self.font_info, self.content_rect.width, 2
+        ):
+            surf = self.font_info.render(line, True, COLORS.text_dim)
+            screen.blit(surf, (self.content_rect.x, info_y))
+            info_y += 15
 
         for inp in self.inputs:
             inp.draw(screen)
@@ -419,9 +458,10 @@ class MapSetup(WidgetBase):
         self.btn_open.draw(screen)
 
         if self.error_message:
-            err = FONTS.get_font(12).render(
-                self.error_message, True, COLORS.danger
+            err_text = fit_text(
+                FONTS.get_font(12), self.error_message, self.content_rect.width
             )
+            err = FONTS.get_font(12).render(err_text, True, COLORS.danger)
             screen.blit(err, (self.content_rect.x, self.btn_create.rect.y - 20))
 
         self._start_menu.draw(screen)

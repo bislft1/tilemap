@@ -74,9 +74,13 @@ class SpriteEditor:
     ):
         self.rect = Rect(rect)
         self.image_path = image_path
+        self._loaded_from: Path | None = image_path
         self._data_root = data_root or (image_path.parent if image_path else Path.cwd())
         self._save_path: Path | None = None
         self._file_manager: object | None = None
+        self._mini_nav: "MiniFileNavigator | None" = None
+        self._recent_images: list[Path] = []
+        self._last_browse_dir: Path | None = None
         self.mode = "grid"
         self._pending_drops: list[Path] | None = None
         self._drop_hover = False
@@ -165,6 +169,7 @@ class SpriteEditor:
                 "File",
                 [
                     MenuAction("Open...", self._on_open, "Ctrl+O"),
+                    MenuAction("Quick Open...", self._on_quick_open, "Ctrl+P"),
                     MenuAction(
                         "Save",
                         self._on_save,
@@ -445,6 +450,7 @@ class SpriteEditor:
             layout.add_separator(group=group, priority=self._PRIO[group])
 
         add_icon("load", "Open spritesheets (Ctrl+O)", self._on_open, "open", self._GRP_FILE)
+        add_icon("file_list", "Quick open (Ctrl+P)", self._on_quick_open, "quick_open", self._GRP_FILE)
         add_icon("save", "Save PNG (Ctrl+S)", self._on_save, "save", self._GRP_FILE)
         sep(self._GRP_FILE)
 
@@ -964,6 +970,9 @@ class SpriteEditor:
                 self._show_shortcuts = False
                 return True
 
+        if self._mini_nav is not None:
+            return self._mini_nav.handle_event(event)
+
         if self._file_manager is not None:
             return self._file_manager.handle_event(event)
 
@@ -1022,6 +1031,9 @@ class SpriteEditor:
                     return True
                 if event.key == pygame.K_o:
                     self._on_open()
+                    return True
+                if event.key == pygame.K_p:
+                    self._on_quick_open()
                     return True
                 if event.key == pygame.K_e:
                     self._on_export_all()
@@ -1337,6 +1349,9 @@ class SpriteEditor:
         if self._file_manager is not None:
             self._file_manager.draw(screen)
 
+        if self._mini_nav is not None:
+            self._mini_nav.draw(screen)
+
         self.menubar.draw(screen)
 
         self._notifications.draw(screen)
@@ -1360,6 +1375,7 @@ class SpriteEditor:
 
     SHORTCUTS = [
         ("Open", "Ctrl+O"),
+        ("Quick open", "Ctrl+P"),
         ("Save", "Ctrl+S"),
         ("Export PNGs", "Ctrl+E"),
         ("Undo", "Ctrl+Z"),
@@ -1432,6 +1448,78 @@ class SpriteEditor:
     def _close_file_manager(self) -> None:
         self._file_manager = None
 
+    # ------------------------------------------------------------------
+    # quick open (inline file navigator)
+    # ------------------------------------------------------------------
+
+    QUICK_OPEN_PREFS = ".quick_open.json"
+
+    def _load_quick_open_prefs(self) -> dict:
+        path = self._data_root / self.QUICK_OPEN_PREFS
+        try:
+            import json
+
+            data = json.loads(path.read_text())
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_quick_open_prefs(self) -> None:
+        if self._mini_nav is None:
+            return
+        path = self._data_root / self.QUICK_OPEN_PREFS
+        try:
+            import json
+
+            path.write_text(json.dumps(self._mini_nav.geometry()))
+        except OSError:
+            pass
+
+    def _on_quick_open(self) -> None:
+        from widgets.ui.mini_file_navigator import MiniFileNavigator
+
+        self._file_manager = None
+        content = self.viewport.content_rect
+        w = min(360, max(240, content.w - 24))
+        h = min(340, max(220, content.h - 24))
+        rect = Rect(content.x + 12, content.y + 12, w, h)
+
+        prefs = self._load_quick_open_prefs()
+        start = self._last_browse_dir or prefs.get("dir") or (
+            self.image_path.parent if self.image_path else self._data_root
+        )
+        if not isinstance(start, Path) or not start.exists():
+            start = self._data_root
+
+        self._mini_nav = MiniFileNavigator(
+            rect=rect,
+            initial_dir=Path(start),
+            allowed_exts=list(IMAGE_EXTS),
+            on_select=self._on_quick_select,
+            on_cancel=self._close_mini_nav,
+            data_root=self._data_root,
+            recents=self._recent_images,
+            title="Open Image",
+            bounds=content,
+            current=self._loaded_from,
+        )
+        # reopen at the same size and position the user left it
+        self._mini_nav.restore_geometry(prefs)
+
+    def _close_mini_nav(self) -> None:
+        if self._mini_nav is not None:
+            self._last_browse_dir = self._mini_nav.current_dir
+            self._save_quick_open_prefs()
+        self._mini_nav = None
+
+    def _on_quick_select(self, path: Path) -> None:
+        # the navigator stays open for rapid multi-picking; remember where
+        # the user is browsing so reopening lands in the same place
+        if self._mini_nav is not None:
+            self._last_browse_dir = self._mini_nav.current_dir
+            self._save_quick_open_prefs()
+        self._on_add_sheets([path])
+
     def _open_save_dialog(self) -> None:
         if not self.doc.has_canvas:
             self._status_bar.warning("No spritesheet loaded")
@@ -1497,6 +1585,8 @@ class SpriteEditor:
             selection = [selection]
         if self._sort_natural:
             selection = sorted(selection, key=lambda p: natural_key(p.name))
+        if selection:
+            self._loaded_from = selection[0]
         loaded_names: list[str] = []
         surfaces: list[Surface] = []
         for path in selection:

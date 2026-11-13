@@ -5,7 +5,7 @@ import pygame
 from utils.icon_manager import icon_manager
 
 from ..widget_base import WidgetBase
-from .theme import COLORS, FONTS, SHAPE
+from .theme import COLORS, FONTS, SHAPE, fit_text
 
 
 class Button(WidgetBase):
@@ -146,5 +146,9 @@ class Button(WidgetBase):
             icon = icon_manager.get_icon(self.icon_key, self.icon_size, text_color)
             surface.blit(icon, icon.get_rect(center=rect.center))
         elif self.text:
-            label = self.font.render(self.text, True, text_color)
+            # keep the label inside the button: ellipsize instead of
+            # letting long text bleed past the rect
+            max_text_w = rect.w - 16
+            text = fit_text(self.font, self.text, max_text_w)
+            label = self.font.render(text, True, text_color)
             surface.blit(label, label.get_rect(center=rect.center))

@@ -328,7 +328,7 @@ class Editor:
 
         center_x = (self.width - 400) // 2
         center_y = (self.height - 400) // 2
-        self.map_setup_widget = MapSetup(self, Rect(center_x, center_y, 400, 460))
+        self.map_setup_widget = MapSetup(self, Rect(center_x, center_y, 400, 400))
         self.map_setup_widget.visible = True
         self.map_properties_dialog = MapPropertiesDialog(self, Rect(center_x, center_y, 400, 260))
         self.node_manager = NodeManager(self)
@@ -986,7 +986,7 @@ class Editor:
         if hasattr(self, "map_setup_widget") and self.map_setup_widget:
             center_x = (width - 400) // 2
             center_y = (height - 460) // 2
-            self.map_setup_widget.resize(Rect(center_x, center_y, 400, 460))
+            self.map_setup_widget.resize(Rect(center_x, center_y, 400, 400))
             if self.map_properties_dialog:
                 self.map_properties_dialog.resize(Rect(center_x, center_y, 400, 260))
 

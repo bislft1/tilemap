@@ -7,7 +7,7 @@ import math
 import pygame
 from pygame import Rect, Surface
 
-from widgets.ui.theme import COLORS, FONTS
+from widgets.ui.theme import COLORS, FONTS, fit_text
 
 from .camera import Camera
 from .document import Document
@@ -266,6 +266,8 @@ class Viewport:
 
         parts: list[str] = []
         if self.doc.has_canvas:
+            if self.doc.sheets:
+                parts.append(self.doc.sheets[0])
             w, h = self.doc.size
             parts.append(f"{w}×{h}")
             parts.append(f"Tiles {self.doc.cols}×{self.doc.rows}")
@@ -276,5 +278,7 @@ class Viewport:
         else:
             parts.append("blank canvas")
         font = FONTS.get_small_font()
-        label = font.render("   ".join(parts), True, COLORS.text)
+        label = font.render(
+            fit_text(font, "   ".join(parts), self.rect.w - 12), True, COLORS.text
+        )
         screen.blit(label, (self.rect.x + 6, header_rect.centery - label.get_height() // 2 + 1))

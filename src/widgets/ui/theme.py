@@ -554,3 +554,24 @@ SPACING = {
     "xxl": 24,
     "xxxl": 32,
 }
+
+
+def fit_text(font: pygame.font.Font, text: str, max_w: int) -> str:
+    """Shorten text with a trailing ellipsis so it fits ``max_w`` pixels.
+
+    Returns the original text when it already fits, and an empty string
+    when even the ellipsis does not fit.
+    """
+    if max_w <= 0:
+        return ""
+    try:
+        if font.size(text)[0] <= max_w:
+            return text
+        ellipsis = "…"
+        if font.size(ellipsis)[0] > max_w:
+            return ""
+        while text and font.size(text + ellipsis)[0] > max_w:
+            text = text[:-1]
+        return text + ellipsis
+    except Exception:
+        return text

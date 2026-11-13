@@ -481,6 +481,23 @@ class IconManager:
                 surface, color, (padding, padding, size // 2, 6), border_radius=1
             )
 
+        elif name == "file_list":
+            line_h = max(1, size // 16)
+            dot_r = max(1, size // 10)
+            rows = 3
+            span = size - 2 * padding
+            step = (span - line_h) // max(1, rows - 1)
+            for i in range(rows):
+                cy = padding + i * step
+                pygame.draw.circle(surface, color, (padding + dot_r, cy), dot_r)
+                pygame.draw.line(
+                    surface,
+                    color,
+                    (padding + dot_r * 2 + 3, cy),
+                    (size - padding, cy),
+                    line_h,
+                )
+
         else:
             pygame.draw.rect(
                 surface,
@@ -575,6 +592,7 @@ def has_icon(name: str) -> bool:
         "save",
         "load",
         "folder",
+        "file_list",
         "zoomin",
         "zoomout",
         "reset",
