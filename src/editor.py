@@ -1555,6 +1555,29 @@ class Editor:
         except Exception as e:
             error_handler.capture(e, context="launch_character_collision_editor")
 
+    def launch_character_hitbox_editor(self, anim_path: Path | None = None):
+        try:
+            args = [
+                "--name",
+                "Character",
+                "--data-root",
+                str(self.data_root),
+            ]
+            if anim_path is not None and Path(anim_path).exists():
+                args.append(str(anim_path))
+
+            process = launch_standalone(
+                "plugins.character_hitbox.standalone",
+                args,
+                cwd=self.base_path,
+                text=True,
+            )
+            self.child_processes.append(process)
+
+            print("Launched character hitbox editor")
+        except Exception as e:
+            error_handler.capture(e, context="launch_character_hitbox_editor")
+
     def launch_error_console(self):
         if self.error_console_process and self.error_console_process.poll() is None:
             print("Error console is already running")
