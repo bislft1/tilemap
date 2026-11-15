@@ -7,6 +7,8 @@ from pathlib import Path
 # Sources whose rendered strings this rule owns: the particle plugin,
 # the widgets it renders through, and the particle tests themselves.
 OWNED = [
+    "src/plugins/character_hitbox/*.py",
+    "src/widgets/ui/shape_canvas.py",
     "src/plugins/particle_editor/*.py",
     "src/widgets/particle_system.py",
     "src/widgets/particle_presets.py",
