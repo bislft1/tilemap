@@ -51,6 +51,7 @@ def make_editor():
         launch_sprite_editor=lambda: None,
         launch_particle_editor=lambda *a: None,
         launch_character_collision_editor=lambda: None,
+        launch_character_hitbox_editor=lambda: None,
         autotile_active=lambda: None,
         flood_fill_active=lambda: None,
         rect_fill_active=lambda: None,

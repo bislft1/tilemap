@@ -103,6 +103,10 @@ class MenuBar:
                         self.editor.launch_character_collision_editor,
                     ),
                     MenuAction(
+                        "Character Hitbox Editor",
+                        self.editor.launch_character_hitbox_editor,
+                    ),
+                    MenuAction(
                         "Autotile Active Layer", self.editor.autotile_active, "Ctrl+A"
                     ),
                     MenuAction(

@@ -145,6 +145,7 @@ class TestEditMenu:
         ed.launch_sprite_editor = lambda: None
         ed.launch_particle_editor = lambda *a: None
         ed.launch_character_collision_editor = lambda: None
+        ed.launch_character_hitbox_editor = lambda: None
         ed.autotile_active = lambda: None
         ed.flood_fill_active = lambda: None
         ed.rect_fill_active = lambda: None
